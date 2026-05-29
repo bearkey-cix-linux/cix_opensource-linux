@@ -167,7 +167,7 @@ static int rts5453h_typec_port_update(struct rts5453h *typec)
 	if (typec->data_status[2] & DEBUG_ACCESSORY_ATTACHED) {
 		//debug accessory mode
 		dev_err(typec->dev, "debug accessory mode not support, try with another usb cable\n");
-		return 0;
+	//	return 0;
 	}
 
 	if ((typec->data_status[1] & USB3_2_CONNECTION) &&
@@ -297,35 +297,62 @@ static void rts5453h_typec_register_port_altmodes(struct rts5453h *typec)
 static int rts5453h_event_handler(struct rts5453h *rts, u8 clear_irq)
 {
 	int ret = 0;
-	u8 data_control[3] = {0};
-
+	int num = 0;
+	u8 data_control[5] = {0};
+	  dev_info(rts->dev,"%s clear_irq=%d\n",__func__,clear_irq);
 	mutex_lock(&rts->lock);
 	if (clear_irq) {
-		data_control[0] = 2;
+		data_control[0] = 4;
 		data_control[1] = I2C_INT_ACK_BIT;
 		data_control[2] = 0;
-
-		ret = rts5453h_block_write(rts, RTS_DATA_CONTROL, data_control, 3);
-		if (ret != 0 ) {
-				goto i2c_err;
+		if(rts->id == 0)
+		{
+				data_control[3] = 0;
+				dev_info(rts->dev," this is typec0 clear_irq\n");
 		}
-	}
+		else if(rts->id == 1)
+		{
+				data_control[3] = 1;
+				dev_info(rts->dev," this is typec1 clear_irq\n");
+		}
+		else
+		{
+				dev_info(rts->dev,"the typec port is error!\n");
+		}
+		data_control[4] = 0;
 
-	ret = rts5453h_block_read(rts, RTS_DATA_STATUS, rts->data_status, 6);
-	if (ret != 0 ) {
-		goto i2c_err;
-	} else {
+		ret = rts5453h_block_write(rts, RTS_DATA_CONTROL, data_control, 5);
+	}
+        while(num++<5){
+		ret = rts5453h_block_read(rts, RTS_DATA_STATUS, rts->data_status, 6);
+		if((ret == 0)&&(rts->data_status[1]!=0xff)&&(rts->data_status[2]!=0xff))
+			break;
+	}
 		dev_info(rts->dev, "typec port(%d):data status = 0x%x , 0x%x, 0x%x, 0x%x, 0x%x, 0x%x\n",
 			rts->id, rts->data_status[0], rts->data_status[1], rts->data_status[2], rts->data_status[3], rts->data_status[4], rts->data_status[5]);
-	}
 
 	rts5453h_typec_port_update(rts);
 
 	if (rts->data_status[2] & HPD_IRQ) {
-		data_control[0] = 2;
+		data_control[0] = 4;
 		data_control[1] = 0;
 		data_control[2] = HPD_IRQ_ACK;
-		ret = rts5453h_block_write(rts, RTS_DATA_CONTROL, data_control, 3);
+		if(rts->id == 0)
+		{
+				data_control[3] = 0;
+				dev_info(rts->dev," this is typec0 HPD_IRQ\n");
+		}
+		else if(rts->id == 1)
+		{
+				data_control[3] = 1;
+				dev_info(rts->dev," this is typec1 HPD_IRQ\n");
+		}
+		else
+		{
+				dev_info(rts->dev,"the typec port is error!\n");
+		}
+		data_control[4] = 0;
+		ret = rts5453h_block_write(rts, RTS_DATA_CONTROL, data_control, 5);
 		if (ret != 0 ) {
 			goto i2c_err;
 		}
@@ -518,6 +545,7 @@ static int rts5453h_probe(struct i2c_client *client)
 	struct rts5453h *rts;
 	int ret;
 
+	dev_err(&client->dev,"%s %d\n",__func__,__LINE__);
 	dev_dbg(&client->dev, "IRQ %d supplied\n", client->irq);
 	rts = devm_kzalloc(&client->dev, sizeof(*rts), GFP_KERNEL);
 	if (!rts)
@@ -527,7 +555,9 @@ static int rts5453h_probe(struct i2c_client *client)
 	if (ret < 0)
 		return ret;
 
+	dev_err(&client->dev,"%s %d\n",__func__,__LINE__);
 	rts5453h_typec_register_port_altmodes(rts);
+	dev_err(&client->dev,"%s %d\n",__func__,__LINE__);
 
 	mutex_init(&rts->lock);
 
@@ -559,6 +589,7 @@ static int rts5453h_probe(struct i2c_client *client)
 	* or check the firmware running status before request irq
 	*/
 	if (client->irq) {
+		dev_err(&client->dev,"%s %d\n",__func__,__LINE__);
 		irq_set_status_flags(client->irq, IRQ_DISABLE_UNLAZY);
 		ret = devm_request_threaded_irq(&client->dev,
 						client->irq, NULL,
@@ -575,7 +606,7 @@ static int rts5453h_probe(struct i2c_client *client)
 	if (ret < 0)
 		dev_err(&client->dev, "Failed to create sysfs attribute, ret = %d\n",
 			ret);
-
+	dev_err(&client->dev,"%s %d success\n",__func__,__LINE__);
 	device_set_wakeup_capable(&client->dev, true);
 
 	return ret;

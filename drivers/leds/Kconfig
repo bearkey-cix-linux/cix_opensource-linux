@@ -147,6 +147,13 @@ config LEDS_CHT_WCOVE
 	  To compile this driver as a module, choose M here: the module
 	  will be called leds-cht-wcove.
 
+config HARDWARE
+	tristate "support "
+        depends on LEDS_CLASS
+        depends on I2C
+        help
+	This option enables support for hardware GPIO	
+
 config LEDS_CPCAP
 	tristate "LED Support for Motorola CPCAP"
 	depends on LEDS_CLASS

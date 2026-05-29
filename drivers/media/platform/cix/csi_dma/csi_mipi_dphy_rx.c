@@ -26,17 +26,90 @@
 #include <media/v4l2-subdev.h>
 #include <media/v4l2-device.h>
 #include <linux/iopoll.h>
+#include <linux/debugfs.h>
 #include "csi_common.h"
+
 
 #define CIX_MIPI_DPHY_RX_DRIVER_NAME "cix-mipi-dphy"
 #define CIX_MIPI_DPHY_RX_SUBDEV_NAME CIX_MIPI_DPHY_RX_DRIVER_NAME
 #define CIX_MIPI_DPHY_MAX_LANE 4
+
+extern struct dphy_hw *get_dphy_handler(int no);
 
 enum cix_dphy_pads {
 	CIX_DPHY_PAD_SINK,
 	CIX_DPHY_PAD_SOURCE,
 	CIX_DPHY_PAD_MAX,
 };
+
+static struct dentry *mipi_csi_dphy_dir;
+static int dphy_lane_rate = 800;  /*unit is Mb,here is 800M*/
+
+static ssize_t lane_rate_read(struct file *file, char __user *user_buf,
+		size_t count, loff_t *ppos)
+{
+	char buf[8];
+	int len;
+
+	len = snprintf(buf, sizeof(buf), "%d\n",dphy_lane_rate);
+
+	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static ssize_t lane_rate_write(struct file *file, const char __user *user_buf,
+		size_t count, loff_t *ppos)
+{
+	char buf[16];
+	int val;
+
+	size_t len = min(count, sizeof(buf) - 1);
+
+	if (copy_from_user(buf, user_buf, len))
+		return -EFAULT;
+
+	buf[len] = '\0';
+
+	if (kstrtoint(buf, 10, &val))
+		return -EINVAL;
+
+	dphy_lane_rate = val;
+
+	pr_info("lane rate %dM \n",dphy_lane_rate);
+
+	return count;
+}
+
+static const struct file_operations lane_rate_fops = {
+	.read  = lane_rate_read,
+	.write = lane_rate_write,
+};
+
+static int mipi_csi_dphy_debug_init(void)
+{
+	mipi_csi_dphy_dir = debugfs_create_dir("mipi-csi-dphy", NULL);
+	if (IS_ERR(mipi_csi_dphy_dir))
+		return PTR_ERR(mipi_csi_dphy_dir);
+
+	if (!debugfs_create_file("lane_rate", 0644, mipi_csi_dphy_dir, NULL, &lane_rate_fops)) {
+		debugfs_remove_recursive(mipi_csi_dphy_dir);
+		return -ENOMEM;
+	}
+
+	pr_info("mipi-csi dphy debug initialized \n");
+
+	return 0;
+}
+
+static void mipi_csi_dphy_debug_deinit(void)
+{
+	debugfs_remove_recursive(mipi_csi_dphy_dir);
+	pr_info("mipi-csi dphy debug exit \n");
+}
+
+u64 get_mipi_csi_dphy_lane_rate(void)
+{
+	return dphy_lane_rate*1000000;
+}
 
 int v4l2_async_nf_fwnode_parse_endpoint(struct device *dev,
 				    struct v4l2_async_notifier *notifier,
@@ -81,9 +154,9 @@ int v4l2_async_nf_fwnode_parse_endpoint(struct device *dev,
 	if (ret < 0)
 		goto out_err;
 	asc = __v4l2_async_nf_add_fwnode(notifier, asd->fwnode, sizeof(struct v4l2_async_connection));
-	if (IS_ERR_OR_NULL(asc))
+	if (IS_ERR_OR_NULL(asc)) {
 		return -ENOTCONN;
-
+	}
 	if (ret < 0) {
 		/* not an error if asd already exists */
 		if (ret == -EEXIST)
@@ -144,40 +217,10 @@ struct dphy_rx *v4l2_subdev_to_dphy_rx(struct v4l2_subdev *subdev)
 static int cix_dphy_rx_get_sensor_data_rate(struct v4l2_subdev *sd)
 {
 	struct dphy_rx *dphy = v4l2_subdev_to_dphy_rx(sd);
-	struct v4l2_subdev *sensor_sd = dphy->source_subdev;
-	struct v4l2_ctrl *link_freq;
-	struct v4l2_querymenu qm = {
-		.id = V4L2_CID_LINK_FREQ,
-	};
 
-	int ret;
-
-	if (!sensor_sd) {
-		v4l2_warn(sd, "sensor subdev not register\n");
-		return -EINVAL;
-	}
-
-	link_freq = v4l2_ctrl_find(sensor_sd->ctrl_handler, V4L2_CID_LINK_FREQ);
-	if (!link_freq) {
-		v4l2_warn(sd, "No pixel rate control in subdev\n");
-		return -EPIPE;
-	}
-
-	qm.index = v4l2_ctrl_g_ctrl(link_freq);
-	ret = v4l2_querymenu(sensor_sd->ctrl_handler, &qm);
-	if (ret < 0) {
-		v4l2_err(sd, "Failed to get menu item\n");
-		return ret;
-	}
-
-	if (!qm.value) {
-		v4l2_err(sd, "Invalid link_freq\n");
-		return -EINVAL;
-	}
-
-	/* Phy data_rate = LT7911 x 2*/
-	dphy->data_rate = qm.value * 2;
+	dphy->data_rate = get_mipi_csi_dphy_lane_rate();
 	dphy->data_rate_mbps = dphy->data_rate / 1000 / 1000;
+
 	v4l2_info(sd, "dphy%d, data_rate_mbps %d\n", dphy->id,
 		  dphy->data_rate_mbps);
 
@@ -280,13 +323,28 @@ static int mipi_dphy_rx_s_stream(struct v4l2_subdev *sd, int enable)
 		dev_info(dphy->dev, "dphy hardware attach failed\n");
 
 	if (enable) {
+
 		pm_runtime_get_sync(dphy->dev);
-		hw_drv->stream_on(dphy, dphy->id, dphy->data_rate);
-		dphy->stream_on = 1;
+
+		/*slave */
+		{
+			struct dphy_hw * dphy_hw = get_dphy_handler(1);
+			hw_drv->stream_on(dphy_hw, dphy->id, dphy->data_rate);
+		}
+
+		hw_drv->stream_on(dphy->dphy_hw, dphy->id, dphy->data_rate);
+
 	} else {
-		hw_drv->stream_off(dphy, dphy->id);
+
+		/*slave */
+		{
+			struct dphy_hw * dphy_hw = get_dphy_handler(1);
+			hw_drv->stream_off(dphy_hw, dphy->id);
+		}
+
+		hw_drv->stream_off(dphy->dphy_hw, dphy->id);
+
 		pm_runtime_put(dphy->dev);
-		dphy->stream_on = 0;
 	}
 
 	return ret;
@@ -335,7 +393,6 @@ static int mipi_dphy_rx_get_fmt(struct v4l2_subdev *sd,
 	ret = cix_dphy_rx_get_sensor_data_rate(sd);
 	if (ret < 0)
 		return ret;
-
 	mf->reserved[0] = dphy->data_rate_mbps;
 
 	dev_info(dphy->dev, "format.reserved[0]=0x%x, format.reserved[1]=%x,\n",
@@ -417,15 +474,15 @@ static int mipi_dphy_rx_async_bound(struct v4l2_async_notifier *notifier,
 }
 
 static int dphy_parse_endpoint(struct device *dev,
-		struct v4l2_fwnode_endpoint *vep,
-		v4l2_async_subdev *asd)
+                               struct v4l2_fwnode_endpoint *vep,
+                               v4l2_async_subdev *asd)
 {
 	dev_info(dev, "dphy parse the endpoints\n");
 
 	if (vep->base.port != 0) {
 		dev_info(dev,
-				"dphy do not need remote endpoints port %d id %d\n",
-				vep->base.port, vep->base.id);
+			 "dphy do not need remote endpoints port %d id %d\n",
+			 vep->base.port, vep->base.id);
 		return -ENOTCONN;
 	}
 
@@ -539,7 +596,7 @@ static int mipi_dphy_rx_probe(struct platform_device *pdev)
 	dphy_media_init(dphy);
 
 	/*notifier & async subdev init*/
-	v4l2_async_subdev_nf_init(&dphy->notifier, sd);
+	v4l2_async_subdev_nf_init(&dphy->notifier,sd);
 	ret = v4l2_async_nf_parse_fwnode_endpoints(dphy->dev, &dphy->notifier,
 												sizeof(v4l2_async_subdev),
 												dphy_parse_endpoint);
@@ -562,6 +619,8 @@ static int mipi_dphy_rx_probe(struct platform_device *pdev)
 
 	pm_runtime_enable(dev);
 
+	mipi_csi_dphy_debug_init();
+
 	dev_info(dev, "mipi-dphy probe exit %s\n",
 		 ret == 0 ? "success" : "failed");
 
@@ -581,6 +640,8 @@ static int mipi_dphy_rx_remove(struct platform_device *pdev)
 	v4l2_async_nf_cleanup(&dphy->notifier);
 	v4l2_async_unregister_subdev(sd);
 
+	mipi_csi_dphy_debug_deinit();
+
 	dev_info(dev, "mipi_dphy_rx remove exit\n");
 
 	return 0;
@@ -595,7 +656,13 @@ static int mipi_dphy_dev_rpm_suspend(struct device *dev)
 	if (!hw_drv)
 		dev_info(dphy->dev, "dphy hardware attach failed\n");
 
-	hw_drv->dphy_hw_suspend(dphy);
+	/*slave*/
+	{
+		struct dphy_hw * dphy_hw = get_dphy_handler(1);
+		hw_drv->dphy_hw_suspend(dphy_hw);
+	}
+
+	hw_drv->dphy_hw_suspend(dphy->dphy_hw);
 
 	return 0;
 }
@@ -611,7 +678,13 @@ static int mipi_dphy_dev_rpm_resume(struct device *dev)
 		return -1;
 	}
 
-	hw_drv->dphy_hw_resume(dphy);
+	/*slave*/
+	{
+		struct dphy_hw * dphy_hw = get_dphy_handler(1);
+		hw_drv->dphy_hw_resume(dphy_hw);
+	}
+
+	hw_drv->dphy_hw_resume(dphy->dphy_hw);
 
 	return 0;
 }
@@ -634,10 +707,7 @@ static int mipi_dphy_dev_resume(struct device *dev)
 
 	pm_runtime_force_resume(dev);
 
-	/* check if stream on state,if true stream on again */
-	if (dphy->stream_on)
-		if (hw_drv->stream_on)
-			hw_drv->stream_on(dphy, dphy->id, dphy->data_rate);
+//	hw_drv->stream_on(dphy->dphy_hw, dphy->id, dphy->data_rate);
 
 	return 0;
 }
@@ -647,7 +717,7 @@ static const struct dev_pm_ops mipi_dphy_dev_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(mipi_dphy_dev_suspend, mipi_dphy_dev_resume)
 #endif
 #ifdef CONFIG_PM
-	SET_RUNTIME_PM_OPS(mipi_dphy_dev_rpm_suspend,
+		SET_RUNTIME_PM_OPS(mipi_dphy_dev_rpm_suspend,
 				   mipi_dphy_dev_rpm_resume, NULL)
 #endif
 };

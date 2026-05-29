@@ -26,6 +26,7 @@
 #include <media/v4l2-dv-timings.h>
 #include <media/v4l2-mediabus.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/workqueue.h>
 
 #include <sound/jack.h>
 #include <sound/hdmi-codec.h>
@@ -33,6 +34,15 @@
 static int debug = 3;
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug, "debug level (0-3)");
+
+struct plug_work_info {
+	struct work_struct work;
+	struct lt7911uxc *lt7911_info;
+};
+
+struct plug_work_info *plug_work = NULL;
+
+#define LT7911UXC_IRQ_NAME	"lt7911_uxc_irq"
 
 #define TRANNING_TIME_OUT (150)
 #define I2C_MAX_XFER_SIZE (128)
@@ -53,35 +63,69 @@ MODULE_PARM_DESC(debug, "debug level (0-3)");
 #define GET_PAGE_ID(x) ((x >> 8) & 0xFF)
 #define GET_REG(x) ((x)&0xFF)
 
-#define LT7911UXC_CHIPID (0x0119)
-#define CHIPID_REGH (0xe101)
-#define CHIPID_REGL (0xe100)
-#define I2C_EN_REG (0xe0ee)
+#define LT7911UXC_CHIPID (0x0417)
+#define CHIPID_REGH (0x8101)
+#define CHIPID_REGL (0x8100)
+#define I2C_EN_REG (0x80ee)
+
+#define LT7911_WDT_REG (0x8010)
+
+#define IRQ_TYPE_VIDEO (0x86a3)
+/* Interrupt Type */
+#define VIDEO_SIGNAL_LOST	(0x88)
+#define VIDEO_SIGNAL_CAPTURE	(0x55)
+
 #define I2C_ENABLE (0x1)
 #define I2C_DISABLE (0x0)
 
-#define HTOTAL_H (0xe088)
-#define HTOTAL_L (0xe089)
-#define HACT_H (0xe08c)
-#define HACT_L (0xe08d)
+#define MIPI_LANES	(0x86a2)
+#define HDMI_VERSION    (0xb0a2)
 
-#define VTOTAL_H (0xe08a)
-#define VTOTAL_L (0xe08b)
-#define VACT_H (0xe08e)
-#define VACT_L (0xe08f)
+#define INT_COMPARE_REG (0x86a6)
+#define INT_STATUS_86A3 (0x86a3)
+#define INT_STATUS_86A5 (0x86a5)
+
+#define FM1_DET_CLK_SRC_SEL     0x8540
+#define FREQ_METER_H            0x8548
+#define FREQ_METER_M            0x8549
+#define FREQ_METER_L            0x854a
+
+#define HTOTAL_H                0x867c
+#define HTOTAL_L                0x867d
+#define HACT_H                  0x8680
+#define HACT_L                  0x8681
+#define VTOTAL_H                0x867a
+#define VTOTAL_L                0x867b
+#define VACT_H                  0x867e
+#define VACT_L                  0x867f
+
+#define HFP_H                   0x8678
+#define HFP_L                   0x8679
+#define VS                      0x8671
+#define HS_H                    0x8672
+#define HS_L                    0x8673
+#define VBP                     0x8674
+#define VFP                     0x8675
+#define HBP_H                   0x8676
+#define HBP_L                   0x8677
+
+#define COLOR_FMT_STATUS        0xb092
+
+
 #define PORT_N (0xe0a0)
 #define MIPI_F (0xe0a1)
 
-#define PCLK_H (0xe085)
-#define PCLK_M (0xe086)
-#define PCLK_L (0xe087)
+#define PCLK_H (0x8750)
+#define PCLK_M (0x8751)
+#define PCLK_L (0x8752)
+
 #define BYTE_PCLK_H (0xe092)
 #define BYTE_PCLK_M (0xe093)
 #define BYTE_PCLK_L (0xe094)
 #define AUDIO_FS_VALUE_H (0xe090)
 #define AUDIO_FS_VALUE_L (0xe091)
-#define STREAM_CTL (0xe0b0)
-#define ENABLE_STREAM (0x01)
+#define STREAM_CTL	(0x811D)
+#define ENABLE_STREAM (0xFB)
 #define DISABLE_STREAM (0x00)
 #define AUDIO_CH (0xe0b0)
 
@@ -327,8 +371,8 @@ int lt7911_check_tranning_ready(struct lt7911uxc *lt7911uxc)
 	unsigned int loop = 0;
 	int ret = 0;
 
+#if 0
 	lt7911uxc->tranning_enable = 1;
-
 	for (loop = 0; loop < TRANNING_TIME_OUT; loop++) {
 		if (lt7911uxc->tranning_ready)
 			break;
@@ -337,7 +381,7 @@ int lt7911_check_tranning_ready(struct lt7911uxc *lt7911uxc)
 	}
 
 	lt7911uxc->tranning_enable = 0;
-
+#endif
 	dev_info(&lt7911uxc->i2c_client->dev, "wait tranning time %d ms\n",
 		 loop * 10);
 
@@ -468,62 +512,128 @@ static bool lt7911uxc_rcv_supported_res(struct v4l2_subdev *sd, u32 width,
 	}
 
 	if (i == lt7911uxc->cfg_num)
-		return false;
+		return -1;
 
 	else {
 		*mode = i;
-		return true;
+		return 0;
 	}
 }
+
+static void lt7911uxc_get_frame_size(struct v4l2_subdev *sd,int *width,int*height)
+{
+
+	lt7911uxc_i2c_enable(sd);
+	u8 value[2];
+
+	lt7911_select_page(sd, GET_PAGE_ID(HACT_H));
+
+	i2c_rd(sd,GET_REG(HACT_H),value,2);
+	*width = ((value[0] << 8) | value[1]) * 2;
+
+	i2c_rd(sd,GET_REG(VACT_H),value,2);
+	*height = (value[0] << 8) | value[1];
+
+	lt7911uxc_i2c_disable(sd);
+}
+
 
 static int lt7911uxc_get_detected_timings(struct v4l2_subdev *sd,
 					  struct v4l2_dv_timings *timings)
 {
 	struct lt7911uxc *lt7911uxc = to_lt7911uxc(sd);
-	struct device *dev = &lt7911uxc->i2c_client->dev;
 	struct v4l2_bt_timings *bt = &timings->bt;
 	unsigned int mode;
 	static unsigned int poll_cnt;
 
-	u32 hact, vact, htotal, vtotal;
+	u32 hact,vact, htotal, vtotal,hs,vs;
+	u32 hfp,vfp,hbp,vbp;
+	u8 video_fmt;
 	u32 pixel_clock, fps, halt_pix_clk;
 	u8 value[3];
-	u64 byte_clk, mipi_clk, mipi_data_rate;
+	u8 value_wr;
+	u8 hdmi_version;
+	u64 mipi_byte_clk,mipi_bitrate;
+	u8 lanes;
 
 	memset(timings, 0, sizeof(struct v4l2_dv_timings));
 
-	lt7911_select_page(sd, GET_PAGE_ID(PCLK_H));
+	lt7911uxc_i2c_enable(sd);
 
-	i2c_rd(sd, GET_REG(PCLK_H), value, 3);
-	halt_pix_clk = ((value[0] << 16) | (value[1] << 8) | value[2]);
+	lt7911_select_page(sd,GET_PAGE_ID(MIPI_LANES));
+
+	i2c_rd(sd, GET_REG(MIPI_LANES), &lanes,1);
+
+	lt7911_select_page(sd,GET_PAGE_ID(HDMI_VERSION));
+	i2c_rd(sd, GET_REG(HDMI_VERSION),&hdmi_version,1);
+
+	lt7911_select_page(sd,GET_PAGE_ID(INT_COMPARE_REG));
+	value_wr = 1;
+	i2c_wr(sd, GET_REG(INT_COMPARE_REG),&value_wr,1);
+	i2c_rd(sd, GET_REG(INT_STATUS_86A3), value,3);
+
+	lt7911_select_page(sd, GET_PAGE_ID(PCLK_H));
+	i2c_rd(sd, GET_REG(PCLK_H),value, 3);
+
+	halt_pix_clk = (((value[0] & 0xF) << 16) | (value[1] << 8) | value[2]);
 	pixel_clock = halt_pix_clk * CLOCK_UNIT_KHZ;
 
-	i2c_rd(sd, GET_REG(BYTE_PCLK_H), value, 3);
-	byte_clk = ((value[0] << 16) | (value[1] << 8) | value[2]) *
-		   CLOCK_UNIT_KHZ;
-	mipi_clk = byte_clk * 4; //here get the mipi clk
-	mipi_data_rate =
-		byte_clk * 8; //mipi is ddr clk so data_clk = mipi_clk*2
+	if (hdmi_version & 1) {
+		pixel_clock *= 4;
+	}
 
-	i2c_rd(sd, GET_REG(HTOTAL_H), value, 2);
-	htotal = ((value[0] << 8) | value[1]);
+	lt7911_select_page(sd, GET_PAGE_ID(FM1_DET_CLK_SRC_SEL));
+	value_wr = 0x1b;
+	i2c_wr(sd, GET_REG(FM1_DET_CLK_SRC_SEL),&value_wr,1);
+	i2c_rd(sd, GET_REG(FREQ_METER_H),value,3);
 
-	i2c_rd(sd, GET_REG(VTOTAL_H), value, 2);
+	mipi_byte_clk = ((value[0] & 0xf) << 16) | (value[1] << 8) | value[2];
+	mipi_bitrate = mipi_byte_clk * 8 / 1000;
+
+	lt7911_select_page(sd, GET_PAGE_ID(HTOTAL_H));
+
+	i2c_rd(sd,GET_REG(HTOTAL_H),value,2);
+	htotal = ((value[0] << 8) | value[1]) * 2;
+	i2c_rd(sd,GET_REG(VTOTAL_H),value,2);
 	vtotal = (value[0] << 8) | value[1];
 
-	i2c_rd(sd, GET_REG(HACT_H), value, 2);
-	hact = ((value[0] << 8) | value[1]);
+	i2c_rd(sd,GET_REG(HACT_H),value,2);
+	hact = ((value[0] << 8) | value[1]) * 2;
 
-	i2c_rd(sd, GET_REG(VACT_H), value, 2);
-	vact = ((value[0] << 8) | value[1]);
+	i2c_rd(sd,GET_REG(VACT_H),value,2);
+	vact = (value[0] << 8) | value[1];
 
-	i2c_rd(sd, GET_REG(PORT_N), value,
-	       2); //get the phy number & mipi data formate
+	i2c_rd(sd,GET_REG(HS_H),value,2);
+	hs = ((value[0] << 8) | value[1]) * 2;
 
+	i2c_rd(sd,GET_REG(VS),value,1);
+	vs = value[0];
+
+	i2c_rd(sd,GET_REG(HFP_H),value,2);
+	hfp = ((value[0] << 8) | value[1]) * 2;
+
+	i2c_rd(sd,GET_REG(VFP),value,1);
+	vfp = value[0];
+
+	i2c_rd(sd,GET_REG(HBP_H),value,2);
+	hbp = ((value[0] << 8) | value[1]) * 2;
+
+	i2c_rd(sd,GET_REG(VBP),value,1);
+	vbp = value[0];
+
+	printk(KERN_ERR "htotal %d vtotal %d hact %d vact %d \n",htotal,vtotal,hact,vact);
+
+	lt7911_select_page(sd,GET_PAGE_ID(COLOR_FMT_STATUS));
+
+	i2c_rd(sd,GET_REG(COLOR_FMT_STATUS),value,1);
+	video_fmt = (value[0] & GENMASK(6, 5)) >> 5;
+
+	lt7911uxc_i2c_disable(sd);
 	lt7911uxc->nosignal = false;
 	lt7911uxc->is_audio_present = true;
 
 	timings->type = V4L2_DV_BT_656_1120;
+
 	bt->interlaced = V4L2_DV_PROGRESSIVE;
 	bt->width = hact;
 	bt->height = vact;
@@ -533,25 +643,14 @@ static int lt7911uxc_get_detected_timings(struct v4l2_subdev *sd,
 
 	poll_cnt++;
 
-	if ((poll_cnt % (POLL_SHOW_INTERVAL_MS / POLL_INTERVAL_MS)) == 0) {
-		dev_info(dev, "phy number %d mipi formate %d\n", value[0],
-			 value[1]);
-		dev_info(dev, "fps %d htotal %d vtotal %d hact %d vact %d\n",
-			 fps, htotal, vtotal, hact, vact);
-		dev_info(dev,
-			 "byte_clk:%llu, mipi_clk:%llu, mipi_data_rate:%llu\n",
-			 byte_clk, mipi_clk, mipi_data_rate);
-	}
-
 	if (!lt7911uxc_rcv_supported_res(sd, hact, vact, &mode)) {
 		lt7911uxc->nosignal = true;
 		return -EINVAL;
-
 	} else {
 		lt7911uxc->tranning_ready = 1;
 		lt7911uxc->mode = mode;
 		lt7911uxc->fps = fps;
-		lt7911uxc->lane_rate = mipi_data_rate;
+		lt7911uxc->lane_rate = mipi_bitrate;
 		lt7911uxc->byte_rate = pixel_clock;
 	}
 
@@ -562,14 +661,13 @@ static inline void enable_stream(struct v4l2_subdev *sd, bool enable)
 {
 	struct lt7911uxc *lt7911uxc = to_lt7911uxc(sd);
 
+	lt7911uxc_i2c_enable(sd);
 	lt7911_select_page(sd, GET_PAGE_ID(STREAM_CTL));
-
 	if (enable)
 		i2c_wr8(&lt7911uxc->sd, GET_REG(STREAM_CTL), ENABLE_STREAM);
 	else
 		i2c_wr8(&lt7911uxc->sd, GET_REG(STREAM_CTL), DISABLE_STREAM);
-
-	msleep(1);
+	lt7911uxc_i2c_disable(sd);
 }
 
 static int lt7911uxc_get_reso_dist(const struct lt7911uxc_mode *mode,
@@ -586,7 +684,7 @@ static int lt7911uxc_get_reso_dist(const struct lt7911uxc_mode *mode,
 	       abs(dist_fps - cur_fps);
 }
 
-static const struct lt7911uxc_mode *
+const struct lt7911uxc_mode *
 lt7911uxc_find_best_fit(struct lt7911uxc *lt7911uxc)
 {
 	int dist;
@@ -614,7 +712,7 @@ lt7911uxc_find_best_fit(struct lt7911uxc *lt7911uxc)
 	return &lt7911uxc->support_modes[cur_best_fit];
 }
 
-static void lt7911uxc_format_change(struct v4l2_subdev *sd)
+void lt7911uxc_format_change(struct v4l2_subdev *sd)
 {
 	struct v4l2_dv_timings timings;
 	struct lt7911uxc *lt7911uxc = to_lt7911uxc(sd);
@@ -634,11 +732,10 @@ static void lt7911uxc_irq_poll_timer(struct timer_list *t)
 
 static void lt7911uxc_work_i2c_poll(struct work_struct *work)
 {
-	struct lt7911uxc *lt7911uxc =
-		container_of(work, struct lt7911uxc, work_i2c_poll);
-	struct v4l2_subdev *sd = &lt7911uxc->sd;
-
-	lt7911uxc_format_change(sd);
+       /* struct lt7911uxc *lt7911uxc =*/
+		/*container_of(work, struct lt7911uxc, work_i2c_poll);*/
+	/*struct v4l2_subdev *sd = &lt7911uxc->sd;*/
+	/*lt7911uxc_format_change(sd);*/
 }
 
 static int lt7911uxc_subscribe_event(struct v4l2_subdev *sd, struct v4l2_fh *fh,
@@ -652,6 +749,8 @@ static int lt7911uxc_subscribe_event(struct v4l2_subdev *sd, struct v4l2_fh *fh,
 	default:
 		return -EINVAL;
 	}
+
+	return 0;
 }
 
 static int lt7911uxc_g_input_status(struct v4l2_subdev *sd, u32 *status)
@@ -663,22 +762,6 @@ static int lt7911uxc_g_input_status(struct v4l2_subdev *sd, u32 *status)
 	return 0;
 }
 
-static int lt7911uxc_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad,
-				   struct v4l2_mbus_config *cfg)
-{
-	struct lt7911uxc *lt7911uxc = to_lt7911uxc(sd);
-	u32 lane_num = lt7911uxc->bus_cfg.bus.mipi_csi2.num_data_lanes;
-	u32 val = 0;
-
-	val = 1 << (lane_num - 1) | V4L2_MBUS_CSI2_CHANNEL_0 |
-	      V4L2_MBUS_CSI2_CONTINUOUS_CLOCK;
-
-	cfg->type = lt7911uxc->bus_cfg.bus_type;
-	cfg->bus.mipi_csi2.flags = val;
-
-	return 0;
-}
-
 static int lt7911uxc_s_stream(struct v4l2_subdev *sd, int on)
 {
 	struct lt7911uxc *lt7911uxc = to_lt7911uxc(sd);
@@ -686,12 +769,15 @@ static int lt7911uxc_s_stream(struct v4l2_subdev *sd, int on)
 
 	dev_info(dev, "lt7911 stream %s\n", on ? "on" : "off");
 
+	msleep(100);
+
 	enable_stream(sd, on);
 	if (on) {
 		lt7911uxc->tranning_ready = 0;
 		lt7911uxc->stream_on = 1;
-	} else
+	} else {
 		lt7911uxc->stream_on = 0;
+	}
 
 	return 0;
 }
@@ -716,28 +802,46 @@ static int lt7911uxc_enum_frame_sizes(struct v4l2_subdev *sd,
 				      struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct lt7911uxc *lt7911uxc = to_lt7911uxc(sd);
-	int ret;
+	int loop = 0;
+	int mode;
+	int frame_width;
+	int frame_height;
 
-	if (fse->index >= lt7911uxc->active_num)
+	/*just support one frame size at the same time */
+	if (fse->index > 0)
 		return -EINVAL;
 
-	/*now we just support yuyv format*/
-	if (fse->code != MEDIA_BUS_FMT_YUYV8_1X16)
+	if(fse->code != MEDIA_BUS_FMT_YUYV8_1X16)
 		return -EINVAL;
 
-	if (lt7911_check_tranning_ready(lt7911uxc)) {
-		lt7911uxc->cur_mode =
-			&lt7911uxc->support_modes[lt7911uxc->mode];
-		fse->min_width = lt7911uxc->cur_mode->width;
-		fse->max_width = lt7911uxc->cur_mode->width;
-		fse->min_height = lt7911uxc->cur_mode->height;
-		fse->max_height = lt7911uxc->cur_mode->height;
-		ret = 0;
-	} else {
-		ret = -EINVAL;
+	for (loop = 0;loop <100;loop++) {
+
+		lt7911uxc_get_frame_size(sd,&frame_width,&frame_height);
+		if (!lt7911uxc_rcv_supported_res(sd,frame_width,frame_height,&mode)) {
+			lt7911uxc->cur_mode = &lt7911uxc->support_modes[mode];
+			break;
+		}
+		else
+			msleep(100);
 	}
 
-	return ret;
+	/*timeout*/
+	if (loop == 100) {
+		pr_err("enum frame size timeout \n");
+		return -EINVAL;
+	}
+
+	pr_info("enum frame size width %d height %d \n",loop,frame_width,frame_height);
+
+	fse->min_width = frame_width;
+	fse->max_width = frame_width;
+	fse->min_height = frame_height;
+	fse->max_height = frame_height;
+
+	/*not access the register because of the firmware not stable*/
+	msleep(100);
+
+	return 0;
 }
 
 static int lt7911uxc_get_fmt(struct v4l2_subdev *sd,
@@ -745,95 +849,8 @@ static int lt7911uxc_get_fmt(struct v4l2_subdev *sd,
 			     struct v4l2_subdev_format *format)
 {
 	struct v4l2_mbus_framefmt *fmt = &format->format;
-	struct lt7911uxc *lt7911uxc = to_lt7911uxc(sd);
-	int ret = -1;
-
-	if (format->pad != 0)
-		return -EINVAL;
-
-	if (lt7911_check_tranning_ready(lt7911uxc)) {
-		/* retrieve pixel format */
-		fmt->code = LT7911UXC_MEDIA_BUS_FMT;
-		format->format.field = lt7911uxc->timings.bt.interlaced ?
-					       V4L2_FIELD_INTERLACED :
-					       V4L2_FIELD_NONE;
-
-		lt7911uxc->cur_mode =
-			&lt7911uxc->support_modes[lt7911uxc->mode];
-
-		/* retrieve active video frame size */
-		fmt->width = lt7911uxc->cur_mode->width;
-		fmt->height = lt7911uxc->cur_mode->height;
-
-		__v4l2_ctrl_s_ctrl_int64(lt7911uxc->pixel_rate,
-					 lt7911uxc->byte_rate);
-
-		__v4l2_ctrl_s_ctrl(lt7911uxc->link_freq,
-				   lt7911uxc->cur_mode->mipi_freq_idx);
-
-		dev_info(&lt7911uxc->i2c_client->dev,
-			 "%s: mode->mipi_freq_idx(%d)", __func__,
-			 lt7911uxc->cur_mode->mipi_freq_idx);
-
-		dev_info(&lt7911uxc->i2c_client->dev,
-			 "%s: fmt code:%d, w:%d, h:%d, field code:%d\n",
-			 __func__, format->format.code, format->format.width,
-			 format->format.height, format->format.field);
-		ret = 0;
-	} else
-		dev_info(&lt7911uxc->i2c_client->dev, "%s failed\n", __func__);
-
-	return ret;
-}
-
-static int
-lt7911uxc_enum_frame_interval(struct v4l2_subdev *sd,
-			      struct v4l2_subdev_state *state,
-			      struct v4l2_subdev_frame_interval_enum *fie)
-{
-	struct lt7911uxc *lt7911uxc = to_lt7911uxc(sd);
-
-	if (fie->index >= lt7911uxc->cfg_num)
-		return -EINVAL;
-
-	fie->code = LT7911UXC_MEDIA_BUS_FMT;
-
-	fie->width = lt7911uxc->support_modes[fie->index].width;
-	fie->height = lt7911uxc->support_modes[fie->index].height;
-	fie->interval = lt7911uxc->support_modes[fie->index].max_fps;
-
-	return 0;
-}
-
-static int lt7911uxc_set_fmt(struct v4l2_subdev *sd,
-			     struct v4l2_subdev_state *state,
-			     struct v4l2_subdev_format *format)
-{
-	struct lt7911uxc *lt7911uxc = to_lt7911uxc(sd);
-	const struct lt7911uxc_mode *mode;
-
-	/* is overwritten by get_fmt */
-	u32 code = format->format.code;
-	int ret = lt7911uxc_get_fmt(sd, state, format);
-
-	format->format.code = code;
-
-	if (ret)
-		return ret;
-#ifdef SKY1_SOC
-	switch (code) {
-	case LT7911UXC_MEDIA_BUS_FMT:
-		break;
-	default:
-		return -EINVAL;
-	}
-#endif
-	if (format->which == V4L2_SUBDEV_FORMAT_TRY)
-		return 0;
-
-	lt7911uxc->mbus_fmt_code = format->format.code;
-	mode = lt7911uxc_find_best_fit(lt7911uxc);
-	lt7911uxc->cur_mode = mode;
+	fmt->code = LT7911UXC_MEDIA_BUS_FMT;
+	format->format.field = V4L2_FIELD_NONE;
 
 	return 0;
 }
@@ -851,10 +868,26 @@ static int lt7911uxc_g_frame_interval(struct v4l2_subdev *sd,
 	return 0;
 }
 
-static int lt7911uxc_s_frame_interval(struct v4l2_subdev *sd,
-				      struct v4l2_subdev_frame_interval *fi)
+static int lt7911uxc_power_on(struct lt7911uxc *lt7911uxc)
 {
+	pr_info("lt7911uxc power on\n");
+
+	gpiod_set_value(lt7911uxc->power_gpio, 1);
+	msleep(200);
+	gpiod_set_value(lt7911uxc->reset_gpio, 1);
+	msleep(200);
+	gpiod_set_value(lt7911uxc->reset_gpio, 0);
+	msleep(200);
+
 	return 0;
+}
+
+void lt7911uxc_power_off(struct lt7911uxc *lt7911uxc)
+{
+	pr_info("lt7911uxc power off\n");
+
+	gpiod_set_value(lt7911uxc->reset_gpio, 0);
+	gpiod_set_value(lt7911uxc->power_gpio, 0);
 }
 
 static int lt7911uxc_s_power(struct v4l2_subdev *sd, int on)
@@ -867,12 +900,15 @@ static int lt7911uxc_s_power(struct v4l2_subdev *sd, int on)
 
 	mutex_lock(&lt7911uxc->confctl_mutex);
 
-	if (on)
+	if (on) {
 		lt7911uxc->power_on = true;
-	else
+	}
+	else {
 		lt7911uxc->power_on = false;
+	}
 
 	mutex_unlock(&lt7911uxc->confctl_mutex);
+
 	return ret;
 }
 
@@ -886,16 +922,12 @@ static const struct v4l2_subdev_video_ops lt7911uxc_video_ops = {
 	.g_input_status = lt7911uxc_g_input_status,
 	.s_stream = lt7911uxc_s_stream,
 	.g_frame_interval = lt7911uxc_g_frame_interval,
-	.s_frame_interval = lt7911uxc_s_frame_interval,
 };
 
 static const struct v4l2_subdev_pad_ops lt7911uxc_pad_ops = {
 	.enum_mbus_code = lt7911uxc_enum_mbus_code,
 	.enum_frame_size = lt7911uxc_enum_frame_sizes,
-	.enum_frame_interval = lt7911uxc_enum_frame_interval,
-	.set_fmt = lt7911uxc_set_fmt,
 	.get_fmt = lt7911uxc_get_fmt,
-	.get_mbus_config = lt7911uxc_g_mbus_config,
 };
 
 static const struct v4l2_subdev_ops lt7911uxc_ops = {
@@ -930,35 +962,17 @@ static int lt7911uxc_parse(struct lt7911uxc *lt7911uxc)
 		return ret;
 	}
 
-	lt7911uxc->power_gpio =
-		devm_gpiod_get_optional(dev, "power", GPIOD_OUT_HIGH);
+	lt7911uxc->power_gpio = devm_gpiod_get(dev, "power", GPIOD_OUT_HIGH);
 	if (IS_ERR(lt7911uxc->power_gpio)) {
 		dev_err(dev, "failed to get power gpio\n");
 		ret = PTR_ERR(lt7911uxc->power_gpio);
 		return ret;
 	}
 
-	lt7911uxc->power1_gpio =
-		devm_gpiod_get_optional(dev, "power1", GPIOD_OUT_HIGH);
-	if (IS_ERR(lt7911uxc->power1_gpio)) {
-		dev_err(dev, "failed to get power1 gpio\n");
-		ret = PTR_ERR(lt7911uxc->power_gpio);
-		return ret;
-	}
-
-	lt7911uxc->reset_gpio =
-		devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+	lt7911uxc->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(lt7911uxc->reset_gpio)) {
 		dev_err(dev, "failed to get reset gpio\n");
 		ret = PTR_ERR(lt7911uxc->reset_gpio);
-		return ret;
-	}
-
-	lt7911uxc->pwdn_gpio =
-		devm_gpiod_get_optional(dev, "pwdn", GPIOD_OUT_HIGH);
-	if (IS_ERR(lt7911uxc->pwdn_gpio)) {
-		dev_err(dev, "failed to get pwdn gpio\n");
-		ret = PTR_ERR(lt7911uxc->pwdn_gpio);
 		return ret;
 	}
 
@@ -993,43 +1007,6 @@ static int lt7911uxc_parse(struct lt7911uxc *lt7911uxc)
 	return ret;
 }
 
-static int lt7911uxc_power_on(struct lt7911uxc *lt7911uxc)
-{
-	struct device *dev = &lt7911uxc->i2c_client->dev;
-
-	dev_info(dev, "lt7911uxc power on\n");
-
-	gpiod_set_value(lt7911uxc->reset_gpio, 0);
-	gpiod_set_value(lt7911uxc->power_gpio, 0);
-	gpiod_set_value(lt7911uxc->power1_gpio, 0);
-	gpiod_set_value(lt7911uxc->pwdn_gpio, 0);
-
-	usleep_range(20000, 25000);
-
-	gpiod_set_value(lt7911uxc->power_gpio, 1);
-	gpiod_set_value(lt7911uxc->power1_gpio, 1);
-
-	//delay 20ms before reset
-	usleep_range(25000, 30000);
-	gpiod_set_value(lt7911uxc->reset_gpio, 1);
-	gpiod_set_value(lt7911uxc->pwdn_gpio, 1);
-	usleep_range(25000, 30000);
-
-	return 0;
-}
-
-static void lt7911uxc_power_off(struct lt7911uxc *lt7911uxc)
-{
-	struct device *dev = &lt7911uxc->i2c_client->dev;
-
-	dev_info(dev, "lt7911uxc power off\n");
-
-	gpiod_set_value(lt7911uxc->reset_gpio, 0);
-	gpiod_set_value(lt7911uxc->power_gpio, 0);
-	gpiod_set_value(lt7911uxc->power1_gpio, 0);
-	gpiod_set_value(lt7911uxc->pwdn_gpio, 0);
-}
-
 static int lt7911uxc_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
@@ -1038,7 +1015,7 @@ static int lt7911uxc_resume(struct device *dev)
 
 	pinctrl_select_state(lt7911uxc->pinctrl, lt7911uxc->pins_gpio);
 
-	return lt7911uxc_power_on(lt7911uxc);
+	return 0;
 }
 
 static int lt7911uxc_suspend(struct device *dev)
@@ -1047,7 +1024,6 @@ static int lt7911uxc_suspend(struct device *dev)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct lt7911uxc *lt7911uxc = to_lt7911uxc(sd);
 
-	lt7911uxc_power_off(lt7911uxc);
 	pinctrl_select_state(lt7911uxc->pinctrl, lt7911uxc->pins_default);
 
 	return 0;
@@ -1092,6 +1068,25 @@ static int lt7911uxc_init_v4l2_ctrls(struct lt7911uxc *lt7911uxc)
 	return 0;
 }
 
+static void lt7911uxc_stop_wdt(struct lt7911uxc *lt7911uxc)
+{
+	struct v4l2_subdev *sd = &lt7911uxc->sd;
+	u8 data;
+
+	lt7911uxc_i2c_enable(sd);
+
+	lt7911_select_page(sd, GET_PAGE_ID(LT7911_WDT_REG));
+	data = 0x07;
+	i2c_wr(sd, GET_REG(LT7911_WDT_REG), &data, 1);
+	data = 0x05;
+	i2c_wr(sd, GET_REG(LT7911_WDT_REG), &data, 1);
+	data = 0x00;
+	i2c_wr(sd, GET_REG(LT7911_WDT_REG), &data, 1);
+
+	lt7911uxc_i2c_disable(sd);
+
+}
+
 static int lt7911uxc_check_chip_id(struct lt7911uxc *lt7911uxc)
 {
 	struct device *dev = &lt7911uxc->i2c_client->dev;
@@ -1112,9 +1107,112 @@ static int lt7911uxc_check_chip_id(struct lt7911uxc *lt7911uxc)
 		return -EINVAL;
 	}
 
-	dev_info(dev, "check chipid ok, id:%#x", chipid);
-
 	return ret;
+}
+
+static void lt7911_event_report(struct v4l2_subdev *sd, int type,unsigned int data)
+{
+	struct v4l2_event event = {
+		.type = type,
+		.u.src_change.changes = data,
+	};
+
+	if (sd->devnode)
+		v4l2_event_queue(sd->devnode, &event);
+}
+
+static void lt7911_work_handler(struct work_struct *work)
+{
+	struct plug_work_info *data = container_of(work, struct plug_work_info, work);
+	struct lt7911uxc *lt7911uxc = data->lt7911_info;
+	struct v4l2_subdev *sd = &lt7911uxc->sd;
+	u8 irq_status;
+
+	lt7911uxc_i2c_enable(sd);
+	lt7911_select_page(sd,GET_PAGE_ID(IRQ_TYPE_VIDEO));
+	i2c_rd(sd,GET_REG(IRQ_TYPE_VIDEO),&irq_status,1);
+	lt7911uxc_i2c_disable(sd);
+
+	if (lt7911uxc->stream_on == 1) {
+
+		switch(irq_status) {
+
+			case VIDEO_SIGNAL_LOST:
+				pr_info("video signal lost");
+				/*disable the stream*/
+				enable_stream(sd,0);
+				lt7911_event_report(sd, V4L2_EVENT_SOURCE_CHANGE,VIDEO_SIGNAL_LOST);
+				break;
+
+			case VIDEO_SIGNAL_CAPTURE:
+
+				int loop;
+				int mode;
+				int frame_width;
+				int frame_height;
+
+				pr_info("video signal link");
+
+				for (loop = 0;loop <100;loop++) {
+
+					lt7911uxc_get_frame_size(sd,&frame_width,&frame_height);
+					if (!lt7911uxc_rcv_supported_res(sd,frame_width,frame_height,&mode)) {
+						break;
+					}
+					else
+						msleep(100);
+				}
+
+				if ((frame_width == lt7911uxc->cur_mode->width) && (frame_height == lt7911uxc->cur_mode->height))
+				{
+					/*if not change stream on again*/
+					pr_info("frame size not change enable the stream again");
+					enable_stream(sd,1);
+				} else {
+					pr_err("report source change");
+					/*frame size change report to user space*/
+					lt7911_event_report(sd, V4L2_EVENT_SOURCE_CHANGE,VIDEO_SIGNAL_CAPTURE);
+				}
+
+				break;
+			default:
+				;
+		}
+	}
+}
+
+int lt7911uxc_work_queue_init(struct lt7911uxc *lt7911uxc)
+{
+	struct plug_work_info *data;
+
+	data = kmalloc(sizeof(*data), GFP_KERNEL);
+
+	if(data == NULL) {
+		pr_err("init work queue failed");
+		return -1;
+	}
+
+	data->lt7911_info = lt7911uxc;
+
+	INIT_WORK(&data->work, lt7911_work_handler);
+
+	plug_work = data;
+
+	return 0;
+}
+
+void lt7911uxc_schedule_work(void)
+{
+	if(plug_work != NULL) {
+		schedule_work(&plug_work->work);
+	}
+}
+
+irqreturn_t lt7911uxc_irq_handler(int irq, void *dev)
+{
+	lt7911uxc_schedule_work();
+
+	return IRQ_HANDLED;
 }
 
 static void
@@ -1140,6 +1238,7 @@ static int lt7911uxc_audio_hw_params(struct device *dev, void *data,
 {
 	struct lt7911uxc *lt7911uxc = dev_get_drvdata(dev);
 	struct v4l2_subdev *sd = &lt7911uxc->sd;
+#if 0
 	u8 fs_h_v, fs_l_v, ch_v;
 
 	lt7911uxc_i2c_enable(sd);
@@ -1147,7 +1246,7 @@ static int lt7911uxc_audio_hw_params(struct device *dev, void *data,
 	fs_l_v = i2c_rd8(sd, AUDIO_FS_VALUE_L);
 	ch_v = i2c_rd8(sd, AUDIO_CH);
 	lt7911uxc_i2c_disable(sd);
-
+#endif
 	dev_dbg(dev,
 		"%s, daifmt fmt:%d, bit_clk_inv:%d, frame_clk_inv:%d, bit_clk_provider:%d, frame_clk_provider:%d, params sample_rate:%d, sample_width:%d, channels:%d\n",
 		__func__, daifmt->fmt, daifmt->bit_clk_inv,
@@ -1243,12 +1342,31 @@ static int lt7911uxc_probe(struct i2c_client *client)
 	lt7911uxc->timings = default_timing;
 	lt7911uxc->cur_mode = &lt7911uxc->support_modes[0];
 
-	/* FPGA: power will be controlled in download.tcl */
 	lt7911uxc_power_on(lt7911uxc);
 
 	ret = lt7911uxc_check_chip_id(lt7911uxc);
 	if (ret < 0)
 		return ret;
+
+	lt7911uxc_stop_wdt(lt7911uxc);
+
+	/*register irq */
+	if (client->irq) {
+
+		lt7911uxc_work_queue_init(lt7911uxc);
+
+		ret = devm_request_threaded_irq(dev,
+					client->irq, NULL,
+					lt7911uxc_irq_handler,
+					IRQF_TRIGGER_FALLING |
+					IRQF_ONESHOT,LT7911UXC_IRQ_NAME,
+					(void *)lt7911uxc);
+		if (ret) {
+			dev_err(dev,"Could not request interrupt %d!\n",
+					client->irq);
+			return ret;
+		}
+	}
 
 	INIT_WORK(&lt7911uxc->work_i2c_poll, lt7911uxc_work_i2c_poll);
 	timer_setup(&lt7911uxc->timer, lt7911uxc_irq_poll_timer, 0);
@@ -1275,8 +1393,9 @@ static int lt7911uxc_probe(struct i2c_client *client)
 		return ret;
 	}
 #endif
+
 	/* register v4l2_subdev device */
-	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE | V4L2_SUBDEV_FL_IS_I2C;
+	sd->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE | V4L2_SUBDEV_FL_IS_I2C | V4L2_SUBDEV_FL_HAS_EVENTS;
 	lt7911uxc->cfg_num = ARRAY_SIZE(supported_modes_dphy);
 	lt7911uxc->support_modes = supported_modes_dphy;
 	ret = v4l2_async_register_subdev(sd);
@@ -1288,8 +1407,11 @@ static int lt7911uxc_probe(struct i2c_client *client)
 	ret = lt7911uxc_register_audio_device(lt7911uxc);
 	dev_info(dev, "%s:%d, register audio device, ret:%d\n", __func__,
 		 __LINE__, ret);
-	dev_info(dev, "lt7911 probe exit %s\n",
-		 ret == 0 ? "success" : "failed");
+	
+	dev_info(dev, "lt7911 probe exit %s\n",ret == 0 ? "success" : "failed");
+
+	/*disable the stream when probe ,enable the stream at software stream on*/
+	enable_stream(sd, 0);
 
 	return 0;
 error:
@@ -1313,6 +1435,10 @@ static void lt7911uxc_remove(struct i2c_client *client)
 	media_entity_cleanup(&sd->entity);
 #endif
 	v4l2_async_unregister_subdev(sd);
+
+	if (plug_work)
+		 kfree(plug_work);
+
 	dev_info(sd->dev, "lt7911 remove exit\n");
 }
 

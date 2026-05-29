@@ -27,8 +27,8 @@
 #define CIX_MIPI_DPHY_HW_DRIVER_NAME "cix-mipi-dphy-hw"
 #define HIGH_SPEED_2500M (2500000000)
 
-static int mipi_dphy_hw_dev_resume(struct dphy_rx *dphy);
-static int mipi_dphy_hw_dev_suspend(struct dphy_rx *dphy);
+static int mipi_dphy_hw_dev_resume(struct dphy_hw *dphy_info);
+static int mipi_dphy_hw_dev_suspend(struct dphy_hw *dphy_info);
 
 struct phy_config {
 	unsigned int offset;
@@ -40,6 +40,27 @@ struct phy_config dphy_config_2500M[] = {
 	{ 0x708, 0xF600 }, { 0x808, 0xF600 }, { 0xb00, 0x02d6 },
 	{ 0xb0c, 0x02aa },
 };
+
+struct dphy_hw  *dphy_hw_info[2];
+
+struct dphy_hw *get_dphy_handler(int no)
+{
+	if (no > 1)
+		return NULL;
+
+	return dphy_hw_info[no];
+}
+EXPORT_SYMBOL_GPL(get_dphy_handler);
+
+int set_dphy_handler(struct dphy_hw *handler,int no)
+{
+	if (no > 1)
+		return -1;
+
+	dphy_hw_info[no] = handler;
+
+	return 0;
+}
 
 static inline u32 mipi_dphy_read(struct dphy_hw *mipi_dphy, u32 reg)
 {
@@ -93,10 +114,10 @@ static int cdns_dphy_rx_get_band_ctrl(unsigned long hs_clk_rate)
 	return -EOPNOTSUPP;
 }
 
-static int mipi_dphy_config(struct dphy_rx *dphy, u32 data_rate)
+static int mipi_dphy_config(struct dphy_hw *dphy_info, u32 data_rate)
 {
-	struct dphy_hw *hw = dphy->dphy_hw;
-	struct device *dev = dphy->dev;
+	struct dphy_hw *hw = dphy_info;
+	struct device *dev = dphy_info->dev;
 	int i, band_id = 0;
 	u8 num_lanes = 0;
 	u32 PhyVal = 0;
@@ -388,17 +409,17 @@ static int mipi_dphy_config(struct dphy_rx *dphy, u32 data_rate)
 	return 0;
 }
 
-static int csi2_dphy_hw_stream_on(struct dphy_rx *dphy, unsigned int id,
+static int csi2_dphy_hw_stream_on(struct dphy_hw *dphy_info, unsigned int id,
 				  unsigned int lane_rate)
 {
-	struct dphy_hw *hw = dphy->dphy_hw;
-	struct device *dev = dphy->dev;
+	struct dphy_hw *hw = dphy_info;
+	struct device *dev = dphy_info->dev;
 
 	mutex_lock(&hw->mutex);
 	/*here we need config the full mode or split mode on depend on the id */
 
 	dev_info(dev, "virtual dphy id %d stream on enter\n", id);
-	mipi_dphy_config(dphy, lane_rate);
+	mipi_dphy_config(hw, lane_rate);
 	atomic_inc(&hw->stream_cnt);
 	/*low power*/
 	mutex_unlock(&hw->mutex);
@@ -406,10 +427,10 @@ static int csi2_dphy_hw_stream_on(struct dphy_rx *dphy, unsigned int id,
 	return 0;
 }
 
-static int csi2_dphy_hw_stream_off(struct dphy_rx *dphy, unsigned int id)
+static int csi2_dphy_hw_stream_off(struct dphy_hw *dphy_info, unsigned int id)
 {
-	struct dphy_hw *hw = dphy->dphy_hw;
-	struct device *dev = dphy->dev;
+	struct dphy_hw *hw = dphy_info;
+	struct device *dev = dphy_info->dev;
 
 	mutex_lock(&hw->mutex);
 	/*here we need config the full mode or split mode off depend on the id */
@@ -449,6 +470,8 @@ static int mipi_dphy_hw_parse(struct dphy_hw *dphy)
 			dphy->id);
 		return -EINVAL;
 	}
+
+	printk(KERN_ERR "dphy hw id %d \n",dphy->id);
 
 	/*get the clk & reset*/
 	dphy->psm_clk = devm_clk_get_optional(dev, "phy_psmclk");
@@ -520,6 +543,8 @@ static int mipi_dphy_hw_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, dphy);
 
+	set_dphy_handler(dphy,dphy->id);
+
 	dev_info(dev, "mipi-dphy hw probe exit %s\n",
 		 ret == 0 ? "success" : "failed");
 
@@ -535,9 +560,9 @@ static int mipi_dphy_hw_remove(struct platform_device *pdev)
 }
 
 /*for pm interface ,here work at full mode, if work at split mode need more process*/
-static int mipi_dphy_hw_dev_suspend(struct dphy_rx *dphy_rx)
+static int mipi_dphy_hw_dev_suspend(struct dphy_hw *dphy_info)
 {
-	struct dphy_hw *dphy = dphy_rx->dphy_hw;
+	struct dphy_hw *dphy = dphy_info;
 
 	if (!dphy->rst_dphy || !dphy->phy_cmnrst || !dphy->psm_clk ||
 	    !dphy->apb_clk)
@@ -551,9 +576,9 @@ static int mipi_dphy_hw_dev_suspend(struct dphy_rx *dphy_rx)
 	return 0;
 }
 
-static int mipi_dphy_hw_dev_resume(struct dphy_rx *dphy_rx)
+static int mipi_dphy_hw_dev_resume(struct dphy_hw *dphy_info)
 {
-	struct dphy_hw *dphy = dphy_rx->dphy_hw;
+	struct dphy_hw *dphy = dphy_info;
 	int ret;
 
 	if (!dphy->rst_dphy || !dphy->phy_cmnrst || !dphy->psm_clk ||

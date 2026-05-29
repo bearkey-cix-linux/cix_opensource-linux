@@ -185,7 +185,7 @@ static void cdns_gpio_irq_handler(struct irq_desc *desc)
 
 	status = ioread32(cgpio->regs + CDNS_GPIO_IRQ_STATUS) &
 		~ioread32(cgpio->regs + CDNS_GPIO_IRQ_MASK);
-
+	pr_err("%s,status=0x%x\n",__func__,status);
 	for_each_set_bit(hwirq, &status, chip->ngpio)
 		generic_handle_domain_irq(chip->irq.domain, hwirq);
 
@@ -461,7 +461,7 @@ static int __maybe_unused cdns_gpio_resume(struct device *dev)
 
 
 static const struct dev_pm_ops cdns_gpio_dev_ops = {
-	LATE_SYSTEM_SLEEP_PM_OPS(cdns_gpio_suspend, cdns_gpio_resume)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(cdns_gpio_suspend, cdns_gpio_resume)
 };
 
 static const struct of_device_id cdns_of_ids[] = {

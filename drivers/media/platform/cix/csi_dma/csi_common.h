@@ -42,16 +42,10 @@
 /* For dump register */
 #define CSI_DMA_DEBUG
 
-#define CIX_PLATFORM_SOC	(0)
-#define CIX_PLATFORM_EMU	(1)
-#define CIX_PLATFORM_FPGA	(2)
-
 /* CIX Media Device & Subdev's Name */
 #define CIX_MD_DRIVER_NAME		"cix-md"
-#define CIX_DMA_OF_NODE_NAME		"cix-csi-dma"
 #define CIX_BRIDGE_OF_NODE_NAME		"cix-bridge"
-#define CIX_MIPI_CSI2_HW_OF_NODE_NAME	"cix-csi"
-#define CIX_MIPI_CSI2_HW_DRIVER_NAME	"cix-mipi-csi2-hw"
+#define CIX_MIPI_CSI2_OF_NODE_NAME	"cix-csi"
 #define CIX_MIPI_DPHY_OF_NODE_NAME	"cix-dphy"
 #define CIX_MIPI_DPHY_HW_OF_NODE_NAME	"cix-dphy-hw"
 
@@ -61,11 +55,8 @@
 
 /* Driver Name base on devicetree */
 #define CSI_DMA_DRIVER_NAME		"cix-bridge"
-#define CSI_DMA_HW_DRIVER_NAME		"cix-bridge_hw"
 #define CSI_DMA_CAPTURE_NAME		"cix-cap"
 
-
-#define CIX_DMA_DEV_MAX_DEVS	4
 #define CIX_BRIDGE_MAX_DEVS	4
 #define CIX_SENSORS_MAX_DEVS	2
 #define CIX_MIPI_CSI2_MAX_DEVS	4
@@ -85,6 +76,9 @@
 #define CIX_BRIDGE_SD_PAD_SINK_CSI1	1
 #define CIX_BRIDGE_SD_PAD_SOURCE_MEM	2
 #define CIX_BRIDGE_SD_PADS_NUM		3
+
+#define PICTURE_POSITION_LEFT		(0)
+#define PICTURE_POSITION_RIGHT		(1)
 
 /* CIX MIPI CSI PADS */
 #define CIX_MIPI_CSI2_PAD_SINK_DPHY	0
@@ -368,17 +362,16 @@ struct dphy_rx {
 	struct v4l2_ctrl_handler hdl;
 	struct v4l2_ctrl *pixel_rate;
 	struct v4l2_subdev sd;
-	int stream_on;
 	unsigned int lane_num;
 	u64 data_rate;
 	u16 data_rate_mbps;
 };
 
 struct dphy_hw_drv_data {
-	int (*stream_on)(struct dphy_rx *dphy, unsigned int id, unsigned int lane_rate);
-	int (*stream_off)(struct dphy_rx *dphy, unsigned int id);
-	int (*dphy_hw_resume)(struct dphy_rx *dphy);
-	int (*dphy_hw_suspend)(struct dphy_rx *dphy);
+	int (*stream_on)(struct dphy_hw *dphy_info, unsigned int id, unsigned int lane_rate);
+	int (*stream_off)(struct dphy_hw *dphy_info, unsigned int id);
+	int (*dphy_hw_resume)(struct dphy_hw *dphy_info);
+	int (*dphy_hw_suspend)(struct dphy_hw *dphy_info);
 };
 
 /* Rates are in Mbps. */
@@ -413,52 +406,43 @@ enum csi2rx_pads {
 	CSI2RX_PAD_MAX,
 };
 
-struct mipi_csi2_hw {
-	struct platform_device *pdev;
-	struct device *dev;
-	void __iomem *base;
-	const void *drv_data;
-	struct mutex lock;
-	spinlock_t   slock;
-	u8 num_lanes;
-	struct clk	*sclk;
-	struct clk	*pclk;
-	struct clk	*pixel_clk[CSI2RX_STREAMS_MAX];
-	struct	reset_control *reset;
-	atomic_t stream_cnt;
-	u8	platform_id;
-	u8 id;
-};
-
-struct mipi_csi2_hw_drv_data {
-	int (*stream_start)(struct mipi_csi2_hw *mipi_hw, unsigned int stream_id, unsigned int virtual_channel);
-	int (*stream_stop)(struct mipi_csi2_hw *mipi_hw, unsigned int stream_id);
-	int (*mipi_csi2_irq_enable)(struct mipi_csi2_hw *mipi_hw,unsigned int enable);
-	int (*hw_resume)(struct mipi_csi2_hw *mipi_hw);
-	int (*hw_suspend)(struct mipi_csi2_hw *mipi_hw);
-};
-
 struct csi2rx_priv {
 	struct v4l2_subdev	subdev;
 	struct device		*dev;
-	struct platform_device	*pdev;
-	struct mipi_csi2_hw	*mipi_csi2_hw;
+	unsigned int		count;
+
 	struct mutex		lock;
-	spinlock_t		slock;
+	spinlock_t			slock;
+
 	void __iomem		*base;
+	struct clk			*sys_clk;
+	struct clk			*p_clk;
+	struct clk			*pixel_clk[CSI2RX_STREAMS_MAX];
+	struct phy			*dphy;
+
+	struct	reset_control   	*csi_reset;
+
+	u8					lanes[CSI2RX_LANES_MAX];
+	u8					num_lanes;
+	u8					max_lanes;
+	u8					max_streams;
+	bool				has_internal_dphy;
+
 	struct v4l2_async_notifier	notifier;
-	struct media_pad		pads[CSI2RX_PAD_MAX];
+	struct media_pad			pads[CSI2RX_PAD_MAX];
+
+	/* Remote source */
 	v4l2_async_subdev	asd;
-	struct v4l2_subdev		*source_subdev;
+	struct v4l2_subdev			*source_subdev;
+	struct platform_device		*pdev;
+
 	struct v4l2_mbus_framefmt	format;
-	u8	stream_on;
-	u8	hw_stream_id; /*which hardware stream is request,calculate from id*/
-	u8	virtual_chan_id; /*which virtaul channel hw stream request,get from dts todo*/
 	u8	id;
-	u8	num_lanes;
+	u32	status;
 	int	source_pad;
 	u16	sys_clk_freq;
 	u64	data_rate_Mbit;
+	u32	stream_on;
 };
 
 enum csi_dma_out_fmt {
@@ -546,6 +530,58 @@ struct csi_dma_buffer {
 	bool discard;
 };
 
+struct csi_dma_ctx {
+	struct v4l2_fh fh;
+};
+
+struct csi_dma_chan_src {
+	u32 src_csi0;
+	u32 src_csi2;
+};
+
+struct csi_dma_reg {
+	u32 offset;
+	u32 mask;
+};
+
+struct csi_dma_dev_ops {
+	int (*clk_get)(struct csi_dma_dev *csi_dma);
+	int (*clk_enable)(struct csi_dma_dev *csi_dma);
+	void (*clk_disable)(struct csi_dma_dev *csi_dma);
+};
+
+struct csi_dma_panic_thd {
+	u32 mask;
+	u32 offset;
+	u32 threshold;
+};
+
+struct csi_dma_set_thd {
+	struct csi_dma_panic_thd panic_set_thd_y;
+	struct csi_dma_panic_thd panic_set_thd_u;
+	struct csi_dma_panic_thd panic_set_thd_v;
+};
+
+struct csi_dma_rst_ops {
+	int (*parse)(struct csi_dma_dev *csi_dma);
+	int (*assert)(struct csi_dma_dev *csi_dma);
+	int (*deassert)(struct csi_dma_dev *csi_dma);
+};
+
+struct csi_dma_gate_clk_ops {
+	int (*gclk_get)(struct csi_dma_dev *csi_dma);
+	int (*gclk_enable)(struct csi_dma_dev *csi_dma);
+	int (*gclk_disable)(struct csi_dma_dev *csi_dma);
+};
+
+struct csi_dma_plat_data {
+	struct csi_dma_dev_ops *ops;
+	struct csi_dma_chan_src *chan_src;
+	struct csi_dma_set_thd *set_thd;
+	struct csi_dma_rst_ops *rst_ops;
+	struct csi_dma_gate_clk_ops *gclk_ops;
+};
+
 struct csi_dma_cap_dev {
 	struct video_device vdev;
 	struct v4l2_fh fh;
@@ -590,54 +626,32 @@ struct csi_dma_pipeline {
 	int (*set_stream)(struct csi_dma_pipeline *p, bool on);
 };
 
-struct csi_dma_hw_dev {
-	struct device *dev;
-	struct platform_device *pdev;
-	const void *drv_data;
-	struct clk *sclk;
-	struct clk *apbclk;
-	void __iomem *regs;
-	struct reset_control *csibridge_reset;
-	struct mutex lock;
-	spinlock_t slock;
-	u32 axi_uid;
-	int id;
-	u16 sys_clk_freq;
-	u32 status;
-	void (*callback)(void *data);
-	void *data;
-};
-
-struct csi_bridge_hw_drv_data {
-	void (*csi_bridge_hw_start)(struct csi_dma_hw_dev *hw, struct csi_dma_frame *frame);
-	void (*csi_bridge_hw_stop)(struct csi_dma_hw_dev *hw);
-	void (*csi_bridge_updata_plane_addr)(struct csi_dma_hw_dev *hw, int plane_no, u64 base_addr, u64 offset_addr);
-	int (*csi_bridge_hw_resume)(struct csi_dma_hw_dev *hw);
-	int (*csi_bridge_hw_suspend)(struct csi_dma_hw_dev *hw);
-	int (*csi_bridge_callback_register)(struct csi_dma_hw_dev *hw, void *callback, void *data);
-	int (*csi_bridge_enable_irq)(struct csi_dma_hw_dev *hw, int enable);
-	int (*csi_bridge_store)(struct csi_dma_hw_dev *hw);
-	int (*csi_bridge_restore)(struct csi_dma_hw_dev *hw);
-};
-
 struct csi_dma_dev {
 	struct csi_dma_cap_dev *dma_cap;
 	struct device *dev;
 	struct platform_device *pdev;
 	struct v4l2_subdev *sensor_sd;
 	struct csi_rcsu_dev *rcsu_dev;
-	struct csi_dma_hw_dev *bridge_dev;
 	const struct csi_dma_plat_data *pdata;
 	struct v4l2_device v4l2_dev;
 	struct media_device media_dev;
 	struct v4l2_async_notifier notifier;
 	struct csi_dma_pipeline pipe;
+	struct clk *sclk;
+	struct clk *apbclk;
+	void __iomem *regs;
+	struct reset_control *csibridge_reset;
 	struct mutex lock;
 	spinlock_t slock;
 	u8 chain_buf;
+	u8 mode;
+	u8 irq_cnt;
+	u8 picture_position;
 	u32 status;
+	u32 axi_uid;
 	u32 stream_on;
 	int id;
+	int interface[MAX_PORTS];
 	unsigned int is_streaming;
 	bool cap_enabled;
 	bool buf_active_reverse;

@@ -7,11 +7,15 @@
 #include "csi_rcsu_hw.h"
 #include <linux/soc/cix/cix_ddr_lp.h>
 
+extern struct csi_dma_dev *get_csi_dma_dev_handler(int no);
+extern inline void csi_dma_write(struct csi_dma_dev *csi_dma, u32 reg, u32 val);
+
 #define CSIDMA_PLL_CLK 1200
 
 static int csi_dma_cap_streamoff(struct file *file, void *priv,
 				 enum v4l2_buf_type type);
 
+#define CSI_DMA_FRAME_TRACE_COUNT (30)
 
 /* CSI-DMA source format same with output format */
 struct csi_dma_fmt csi_dma_src_formats[] = {
@@ -67,8 +71,8 @@ struct csi_dma_fmt csi_dma_src_formats[] = {
 	{
 		.name = "NV12",
 		.fourcc = V4L2_PIX_FMT_NV12,
-		.depth = { 8 },
-		.memplanes = 1,
+		.depth = { 8, 8 },
+		.memplanes = 2,
 		.mbus_code = MEDIA_BUS_FMT_YVYU8_2X8,
 	},
 	{
@@ -97,197 +101,6 @@ struct csi_dma_fmt csi_dma_src_formats[] = {
 pid_t csi_dma_getpid(void)
 {
 	return current->tgid;
-}
-
-int csi_dma_cap_stream_start(struct csi_dma_dev *csi_dma_info, struct csi_dma_frame *frame)
-{
-	struct csi_dma_dev *csi_dma = csi_dma_info;
-	struct csi_bridge_hw_drv_data *hw_drv;
-
-	hw_drv = (struct csi_bridge_hw_drv_data *)csi_dma->bridge_dev->drv_data;
-	if (!hw_drv)
-		dev_info(csi_dma->dev, "csi bridge hardware attach failed\n");
-
-	hw_drv->csi_bridge_hw_start(csi_dma->bridge_dev, frame);
-
-	return 0;
-}
-
-int csi_dma_cap_stream_stop(struct csi_dma_dev *csi_dma_info)
-{
-	struct csi_dma_dev *csi_dma = csi_dma_info;
-	struct csi_bridge_hw_drv_data *hw_drv;
-
-	hw_drv = (struct csi_bridge_hw_drv_data *)csi_dma->bridge_dev->drv_data;
-	if (!hw_drv)
-		dev_info(csi_dma->dev, "csi bridge hardware attach failed\n");
-
-	hw_drv->csi_bridge_hw_stop(csi_dma->bridge_dev);
-
-	return 0;
-}
-
-int csi_dma_cap_updata_plane_addr(struct csi_dma_dev *csi_dma_info, int plane_no, u64 base_addr, u64 offset_addr)
-{
-	struct csi_dma_dev *csi_dma = csi_dma_info;
-	struct csi_bridge_hw_drv_data *hw_drv;
-
-	hw_drv = (struct csi_bridge_hw_drv_data *)csi_dma->bridge_dev->drv_data;
-	if (!hw_drv)
-		dev_info(csi_dma->dev, "csi bridge hardware attach failed\n");
-
-	hw_drv->csi_bridge_updata_plane_addr(csi_dma->bridge_dev, plane_no, base_addr, offset_addr);
-
-	return 0;
-}
-
-int csi_dma_cap_enable_irq(struct csi_dma_dev *csi_dma_info, int enable)
-{
-	struct csi_dma_dev *csi_dma = csi_dma_info;
-	struct csi_bridge_hw_drv_data *hw_drv;
-
-	hw_drv = (struct csi_bridge_hw_drv_data *)csi_dma->bridge_dev->drv_data;
-	if (!hw_drv)
-		dev_info(csi_dma->dev, "csi bridge hardware enable irq invalid\n");
-
-	hw_drv->csi_bridge_enable_irq(csi_dma->bridge_dev, enable);
-
-	return 0;
-}
-
-int csi_dma_cap_store(struct csi_dma_dev *csi_dma_info)
-{
-	struct csi_dma_dev *csi_dma = csi_dma_info;
-	struct csi_bridge_hw_drv_data *hw_drv;
-
-	hw_drv = (struct csi_bridge_hw_drv_data *)csi_dma->bridge_dev->drv_data;
-	if (!hw_drv)
-		dev_info(csi_dma->dev, "csi bridge hardware store invalid\n");
-
-	hw_drv->csi_bridge_store(csi_dma->bridge_dev);
-
-	return 0;
-}
-
-int csi_dma_cap_restore(struct csi_dma_dev *csi_dma_info)
-{
-	struct csi_dma_dev *csi_dma = csi_dma_info;
-	struct csi_bridge_hw_drv_data *hw_drv;
-
-	hw_drv = (struct csi_bridge_hw_drv_data *)csi_dma->bridge_dev->drv_data;
-	if (!hw_drv)
-		dev_info(csi_dma->dev, "csi bridge hardware store invalid\n");
-
-	hw_drv->csi_bridge_restore(csi_dma->bridge_dev);
-
-	return 0;
-}
-
-void csi_dma_channel_set_outbuf(struct csi_dma_dev *csi_dma,
-				struct csi_dma_buffer *buf)
-{
-	struct vb2_buffer *vb2_buf = &buf->v4l2_buf.vb2_buf;
-	struct frame_addr *paddr = &buf->paddr;
-	struct csi_dma_cap_dev *dma_cap;
-	struct v4l2_pix_format_mplane *pix;
-
-	dma_cap = csi_dma->dma_cap;
-	pix = &dma_cap->pix;
-
-	if (buf->discard) {
-		paddr->y = dma_cap->discard_buffer_dma[0];
-		if (pix->num_planes == CSI_DMA_MAX_PLANES)
-			paddr->cb = dma_cap->discard_buffer_dma[1];
-
-	} else {
-		paddr->y = vb2_dma_contig_plane_dma_addr(vb2_buf, 0);
-		if (vb2_buf->num_planes == CSI_DMA_MAX_PLANES)
-			paddr->cb = vb2_dma_contig_plane_dma_addr(vb2_buf, 1);
-	}
-
-	csi_dma_cap_updata_plane_addr(csi_dma, 0, paddr->y, 0);
-
-	if (pix->pixelformat == V4L2_PIX_FMT_NV12) {
-		/*use y addr add offset width*height*/
-		u64 addr = paddr->y + pix->width*pix->height;
-
-		csi_dma_cap_updata_plane_addr(csi_dma, 1, addr, 0);
-	}
-
-	if (vb2_buf->num_planes == CSI_DMA_MAX_PLANES)
-		csi_dma_cap_updata_plane_addr(csi_dma, 1, paddr->cb, 0);
-}
-
-void csi_dma_frame_done(struct csi_dma_dev *csi_dma)
-{
-	struct csi_dma_cap_dev *dma_cap = csi_dma->dma_cap;
-	struct device *dev = &dma_cap->pdev->dev;
-	struct csi_dma_buffer *buf;
-	struct vb2_buffer *vb2;
-	unsigned long flags;
-
-	dma_cap->frame_count++;
-
-	spin_lock_irqsave(&dma_cap->slock, flags);
-
-	if (list_empty(&dma_cap->out_active)) {
-		spin_unlock_irqrestore(&dma_cap->slock, flags);
-		dev_err(dev, "trying to access empty active list\n");
-		return;
-	}
-
-	buf = list_first_entry(&dma_cap->out_active, struct csi_dma_buffer,
-			       list);
-
-	if (buf->discard) {
-		list_move_tail(dma_cap->out_active.next, &dma_cap->out_discard);
-	} else {
-		vb2 = &buf->v4l2_buf.vb2_buf;
-		list_del_init(&buf->list);
-		buf->v4l2_buf.vb2_buf.timestamp = ktime_get_ns();
-		vb2_buffer_done(&buf->v4l2_buf.vb2_buf, VB2_BUF_STATE_DONE);
-	}
-
-	if (list_empty(&dma_cap->out_pending)) {
-		if (list_empty(&dma_cap->out_discard)) {
-			spin_unlock_irqrestore(&dma_cap->slock, flags);
-			dev_err(dev, "trying to access empty discard list\n");
-			return;
-		}
-
-		buf = list_first_entry(&dma_cap->out_discard,
-				       struct csi_dma_buffer, list);
-		buf->v4l2_buf.sequence = dma_cap->frame_count;
-		csi_dma_channel_set_outbuf(csi_dma, buf);
-		list_move_tail(dma_cap->out_discard.next, &dma_cap->out_active);
-
-		spin_unlock_irqrestore(&dma_cap->slock, flags);
-		return;
-	}
-
-	buf = list_first_entry(&dma_cap->out_pending, struct csi_dma_buffer,
-			       list);
-	buf->v4l2_buf.sequence = dma_cap->frame_count;
-	csi_dma_channel_set_outbuf(csi_dma, buf);
-	vb2 = &buf->v4l2_buf.vb2_buf;
-	vb2->state = VB2_BUF_STATE_ACTIVE;
-	list_move_tail(dma_cap->out_pending.next, &dma_cap->out_active);
-
-	spin_unlock_irqrestore(&dma_cap->slock, flags);
-}
-
-int csi_dma_register_buffer_done(struct csi_dma_dev *csi_dma)
-{
-	struct csi_dma_dev *csi_dma_dev = csi_dma;
-	struct csi_bridge_hw_drv_data *hw_drv;
-
-	hw_drv = (struct csi_bridge_hw_drv_data *)csi_dma_dev->bridge_dev->drv_data;
-	if (!hw_drv)
-		dev_info(csi_dma->dev, "csi bridge hardware attach failed\n");
-
-	hw_drv->csi_bridge_callback_register(csi_dma_dev->bridge_dev, csi_dma_frame_done, csi_dma);
-
-	return 0;
 }
 
 struct csi_dma_fmt *csi_dma_get_format(unsigned int index)
@@ -413,6 +226,69 @@ static int csi_dma_update_buf_paddr(struct csi_dma_buffer *buf, int memplanes)
 
 	return 0;
 }
+
+void csi_dma_cap_frame_write_done(struct csi_dma_dev *csi_dma)
+{
+	struct csi_dma_cap_dev *dma_cap = csi_dma->dma_cap;
+	struct device *dev = &dma_cap->pdev->dev;
+	struct csi_dma_buffer *buf;
+	struct vb2_buffer *vb2;
+	unsigned long flags;
+
+	dma_cap->frame_count++;
+
+	if (csi_dma->irq_cnt > 0) {
+		if ((dma_cap->frame_count % csi_dma->irq_cnt) == 0)
+			dev_info(dev, "[%d] frame received\n", dma_cap->frame_count);
+	}
+
+	spin_lock_irqsave(&dma_cap->slock, flags);
+
+	if (list_empty(&dma_cap->out_active)) {
+		spin_unlock_irqrestore(&dma_cap->slock, flags);
+		dev_warn(dev, "trying to access empty active list\n");
+		return;
+	}
+
+	buf = list_first_entry(&dma_cap->out_active, struct csi_dma_buffer,
+			       list);
+	if (buf->discard) {
+		list_move_tail(dma_cap->out_active.next, &dma_cap->out_discard);
+	} else {
+		vb2 = &buf->v4l2_buf.vb2_buf;
+		list_del_init(&buf->list);
+		buf->v4l2_buf.vb2_buf.timestamp = ktime_get_ns();
+		vb2_buffer_done(&buf->v4l2_buf.vb2_buf, VB2_BUF_STATE_DONE);
+	}
+
+	if (list_empty(&dma_cap->out_pending)) {
+		if (list_empty(&dma_cap->out_discard)) {
+			spin_unlock_irqrestore(&dma_cap->slock, flags);
+			dev_err(dev, "trying to access empty discard list\n");
+			return;
+		}
+
+		buf = list_first_entry(&dma_cap->out_discard,
+				       struct csi_dma_buffer, list);
+		buf->v4l2_buf.sequence = dma_cap->frame_count;
+		csi_dma_channel_set_outbuf(csi_dma, buf);
+		list_move_tail(dma_cap->out_discard.next, &dma_cap->out_active);
+
+		spin_unlock_irqrestore(&dma_cap->slock, flags);
+		return;
+	}
+
+	buf = list_first_entry(&dma_cap->out_pending, struct csi_dma_buffer,
+			       list);
+	buf->v4l2_buf.sequence = dma_cap->frame_count;
+	csi_dma_channel_set_outbuf(csi_dma, buf);
+	vb2 = &buf->v4l2_buf.vb2_buf;
+	vb2->state = VB2_BUF_STATE_ACTIVE;
+	list_move_tail(dma_cap->out_pending.next, &dma_cap->out_active);
+
+	spin_unlock_irqrestore(&dma_cap->slock, flags);
+}
+EXPORT_SYMBOL_GPL(csi_dma_cap_frame_write_done);
 
 static int cap_vb2_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 			       unsigned int *num_planes, unsigned int sizes[],
@@ -715,7 +591,6 @@ static int csi_dma_capture_release(struct file *file)
 	int ret = -1;
 
 	pid_t pid = csi_dma_getpid();
-
 	if ((dma_cap->is_streaming) && (pid == dma_cap->streaming_pid))
 		csi_dma_cap_streamoff(file, NULL, q->type);
 
@@ -724,7 +599,7 @@ static int csi_dma_capture_release(struct file *file)
 	if (dma_cap->ddr_lp_mode == 0) {
 		cix_set_ddrlp(1);
 		dma_cap->ddr_lp_mode = 1;
-		usleep_range(1000, 1000 + 100);
+		usleep_range(1000,1000 + 100);
 	}
 
 	ret = _vb2_fop_release(file, NULL);
@@ -809,13 +684,15 @@ static int csi_dma_cap_g_fmt_mplane(struct file *file, void *fh,
 	struct csi_dma_frame *src_f = &dma_cap->src_f;
 	int i;
 
-	if ((f == NULL) || (src_f == NULL))
+	if ((f == NULL) ||(src_f == NULL)) {
 		return -1;
+	}
 
 	pix = &f->fmt.pix_mp;
 
-	if (pix == NULL)
+	if (pix == NULL) {
 		return -1;
+	}
 
 	pix->width = src_f->width;
 	pix->height = src_f->height;
@@ -931,11 +808,13 @@ static int csi_dma_cap_try_fmt_mplane(struct file *file, void *fh,
 			(ALIGN(pix->width, CSI_DMA_ALIGN) * fmt->depth[i]) >> 3;
 
 		if (pix->plane_fmt[i].sizeimage == 0) {
-
-			if ((pix->pixelformat == V4L2_PIX_FMT_NV12) ||
-					(pix->pixelformat == V4L2_PIX_FMT_NV21)) {
-				/*y + uv*/
-				pix->plane_fmt[i].sizeimage = pix->plane_fmt[i].bytesperline * pix->height  + pix->plane_fmt[i].bytesperline * pix->height/2;
+			if ((i != 0) &&
+			    ((pix->pixelformat == V4L2_PIX_FMT_NV12) ||
+			     (pix->pixelformat == V4L2_PIX_FMT_NV21))) {
+				pix->plane_fmt[i].sizeimage =
+					(pix->plane_fmt[i].bytesperline *
+					 pix->height) >>
+					1;
 			} else {
 				pix->plane_fmt[i].sizeimage =
 					pix->plane_fmt[i].bytesperline *
@@ -1045,7 +924,7 @@ static int csi_dma_cap_s_fmt(struct file *file, void *priv,
 	ret = csi_dma_cap_try_fmt(file, priv, f);
 	if (ret) {
 		dev_info(dev, "csi_dma_cap_try_fmt ret %d", ret);
-		return ret;
+		return -EINVAL;
 	}
 
 	src_f->fmt = fmt;
@@ -1153,12 +1032,12 @@ int csi_dma_config_rcsu(struct csi_dma_cap_dev *dma_cap)
 	/*here we select the mipi-csi2 dev id equal to the csi_dma id */
 	csi_dma->rcsu_dev->chan_mux_sel(csi_dma->rcsu_dev, csi_dma->id,
 					mipi_csi2_dev->id);
-
 	csi_dma->rcsu_dev->dphy_psm_config(csi_dma->rcsu_dev);
 
-	/*temp test force csidma2 use mipi-csi2 stream2*/
-	if (csi_dma->id == 2)
-		csi_dma->rcsu_dev->chan_mux_sel(csi_dma->rcsu_dev, csi_dma->id, 0);
+	/*beiqi slave mode force csidma2 use mipi-csi2 stream2*/
+	if(csi_dma->id == 2) {
+		csi_dma->rcsu_dev->chan_mux_sel(csi_dma->rcsu_dev,2,2);
+	}
 
 	return 0;
 }
@@ -1170,6 +1049,12 @@ static int csi_dma_config_parm(struct csi_dma_cap_dev *dma_cap)
 	ret = csi_dma_source_fmt_init(dma_cap);
 	if (ret < 0)
 		return -EINVAL;
+
+	/*slave*/
+	{
+		struct csi_dma_dev * csi_dma_dev_info = get_csi_dma_dev_handler(2);
+		csi_dma_config_rcsu(csi_dma_dev_info->dma_cap);
+	}
 
 	csi_dma_config_rcsu(dma_cap);
 
@@ -1199,11 +1084,29 @@ void csi_dma_s_stream(struct csi_dma_cap_dev *dma_cap, int enable)
 
 	dev_info(dev, "%s enter enable = %d dma_cap = %p csi_dma = %p\n",
 		 __func__, enable, dma_cap, csi_dma);
+
 	if (enable) {
-		csi_dma_cap_stream_start(csi_dma, &dma_cap->src_f);
+
+		/*slave*/
+		{
+			struct csi_dma_dev * csi_dma_dev_info = get_csi_dma_dev_handler(2);
+			struct csi_dma_frame frame_info = {0};
+			memcpy(&frame_info,&dma_cap->src_f,sizeof(struct csi_dma_frame));
+			csi_dma_bridge_start(csi_dma_dev_info, &frame_info);
+			csi_dma_write(csi_dma_dev_info, INTERRUTP_EN, 0x00); /*disable csidma2 irq*/
+		}
+
+		csi_dma_bridge_start(csi_dma, &dma_cap->src_f);
 		csi_dma->stream_on = 1;
 	} else {
-		csi_dma_cap_stream_stop(csi_dma);
+
+		/*slave*/
+		{
+			struct csi_dma_dev * csi_dma_dev_info = get_csi_dma_dev_handler(2);
+			csi_dma_bridge_stop(csi_dma_dev_info);
+		}
+
+		csi_dma_bridge_stop(csi_dma);
 		csi_dma->stream_on = 0;
 		dev_info(dev, "%s csi_dma stop\n", __func__);
 	}
@@ -1237,6 +1140,12 @@ static int csi_dma_cap_streamon(struct file *file, void *priv,
 
 	dev_info(dev, "csi_dma get sync\n");
 
+	/*slave*/
+	{
+		struct csi_dma_dev * csi_dma_dev_info = get_csi_dma_dev_handler(2);
+		pm_runtime_get_sync(csi_dma_dev_info->dev);
+	}
+
 	pm_runtime_get_sync(dev);
 
 	ret = csi_dma_config_parm(dma_cap);
@@ -1252,7 +1161,7 @@ static int csi_dma_cap_streamon(struct file *file, void *priv,
 	if (dma_cap->ddr_lp_mode == 1) {
 		cix_set_ddrlp(0);
 		dma_cap->ddr_lp_mode = 0;
-		usleep_range(1000, 1000 + 100);
+		usleep_range(1000,1000 + 100);
 	}
 
 	csi_dma_s_stream(dma_cap, 1);
@@ -1297,7 +1206,7 @@ static int csi_dma_cap_streamoff(struct file *file, void *priv,
 	if (dma_cap->ddr_lp_mode == 0) {
 		cix_set_ddrlp(1);
 		dma_cap->ddr_lp_mode = 1;
-		usleep_range(1000, 1000 + 100);
+		usleep_range(1000,1000 + 100);
 	}
 
 	ret = csi_dma_pipeline_enable(dma_cap, 0);
@@ -1403,10 +1312,9 @@ static int csi_dma_cap_enum_framesizes(struct file *file, void *priv,
 				       struct v4l2_frmsizeenum *fsize)
 {
 	struct csi_dma_cap_dev *dma_cap = video_drvdata(file);
-	struct device *dev = &dma_cap->pdev->dev;
-	struct device_node *parent;
 	struct v4l2_subdev *sd = dma_cap->source_subdev;
 	struct csi_dma_fmt *fmt;
+
 	struct v4l2_subdev_frame_size_enum fse = {
 		.index = fsize->index,
 		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
@@ -1417,18 +1325,12 @@ static int csi_dma_cap_enum_framesizes(struct file *file, void *priv,
 	fmt = csi_dma_find_format(&fsize->pixel_format, NULL, 0);
 	if (!fmt || fmt->fourcc != fsize->pixel_format)
 		return -EINVAL;
+
 	fse.code = fmt->mbus_code;
 
 	ret = v4l2_subdev_call(sd, pad, enum_frame_size, NULL, &fse);
 	if (ret)
 		return -EINVAL;
-
-	parent = of_get_parent(dma_cap->pdev->dev.of_node);
-	if (of_device_is_compatible(parent, "cix,cix-bridge") &&
-	    (fse.max_width > CSI_DMA_4K)) {
-		dev_err(dev, "format exceed 4K, CSI-DMA not support\n");
-		return -EINVAL;
-	}
 
 	if (fse.min_width == fse.max_width &&
 	    fse.min_height == fse.max_height) {
@@ -1453,15 +1355,13 @@ static int csi_dma_cap_enum_frameintervals(struct file *file, void *fh,
 {
 	struct csi_dma_cap_dev *dma_cap = video_drvdata(file);
 	struct device *dev = &dma_cap->pdev->dev;
-	struct device_node *parent;
 	struct v4l2_subdev *sd = dma_cap->source_subdev;
 	struct csi_dma_fmt *fmt;
+
 	struct v4l2_subdev_frame_interval_enum fie = {
-		.index = interval->index,
-		.width = interval->width,
-		.height = interval->height,
-		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
+                .index = interval->index,
 	};
+
 	int ret;
 
 	dev_info(dev, "csidma cap frame interval enter\n");
@@ -1472,13 +1372,9 @@ static int csi_dma_cap_enum_frameintervals(struct file *file, void *fh,
 
 	fie.code = fmt->mbus_code;
 	ret = v4l2_subdev_call(sd, pad, enum_frame_interval, NULL, &fie);
-	if (ret)
+	if (ret) {
 		return -EINVAL;
-
-	parent = of_get_parent(dma_cap->pdev->dev.of_node);
-	if (of_device_is_compatible(parent, "cix,cix-bridge") &&
-	    (fie.width > CSI_DMA_4K))
-		return -EINVAL;
+	}
 
 	interval->type = V4L2_FRMIVAL_TYPE_DISCRETE;
 	interval->discrete = fie.interval;
