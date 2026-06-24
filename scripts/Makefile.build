@@ -245,7 +245,10 @@ $(obj)/%.o: $(src)/%.c $(recordmcount_source) FORCE
 
 $(obj)/%.o: $(src)/%.oo $(recordmcount_source) FORCE
 	cp $< $@
-
+	@{ \
+		echo 'cmd_$@ := cp $< $@'; \
+		if [ -f "$(src)/$*.oo.symvers" ]; then cat "$(src)/$*.oo.symvers"; fi; \
+	} > $(dir $@).$(notdir $@).cmd
 # To make this rule robust against "Argument list too long" error,
 # ensure to add $(obj)/ prefix by a shell command.
 cmd_mod = printf '%s\n' $(call real-search, $*.o, .o, -objs -y -m) | \
